@@ -1,7 +1,6 @@
 package handler
 
 import (
-    
     "crypto/tls"
     "fmt"
     "io"
@@ -17,17 +16,16 @@ import (
 )
 
 type ProxyHandler struct {
-    config *config.Config
+    config *config.ProxyConfig // Thay đổi từ Config sang ProxyConfig
     client *http.Client
 }
 
-func NewProxyHandler(cfg *config.Config) *ProxyHandler {
+func NewProxyHandler(cfg *config.ProxyConfig) *ProxyHandler {
     proxyURL, err := url.Parse(cfg.ProxyURL)
     if err != nil {
         utils.GetLogger().Fatal("Failed to parse proxy URL", zap.Error(err))
     }
     
-    // Tạo HTTP client với proxy authentication
     transport := &http.Transport{
         Proxy: http.ProxyURL(proxyURL),
         DialContext: (&net.Dialer{
@@ -48,7 +46,6 @@ func NewProxyHandler(cfg *config.Config) *ProxyHandler {
         Transport: transport,
         Timeout:   120 * time.Second,
         CheckRedirect: func(req *http.Request, via []*http.Request) error {
-            // Cho phép redirects nhưng giới hạn
             if len(via) >= 10 {
                 return fmt.Errorf("too many redirects")
             }

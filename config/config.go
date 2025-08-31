@@ -1,6 +1,7 @@
 package config
 
 import (
+    "bufio"
     "fmt"
     "net/url"
     "os"
@@ -8,7 +9,7 @@ import (
     "strings"
 )
 
-type Config struct {
+type ProxyConfig struct {
     ServerHost string
     ServerPort int
     ProxyURL   string
@@ -18,67 +19,86 @@ type Config struct {
     ProxyPass  string
 }
 
+type Config struct {
+    Proxies []ProxyConfig
+}
+
 func LoadConfig() *Config {
-    // Địa chỉ server của bạn
-    serverHost := getEnv("SERVER_HOST", "192.168.1.75")
-    serverPort := getEnvAsInt("SERVER_PORT", 3000)
-    
-    // Thông tin proxy thật
-    proxyInfo := getEnv("PROXY_INFO", "160.30.191.243:27711:conghung:conghung")
-    
-    // Parse proxy info
-    parts := strings.Split(proxyInfo, ":")
-    if len(parts) != 4 {
-        panic("Invalid proxy format. Expected: IP:PORT:USERNAME:PASSWORD")
-    }
-    
-    proxyHost := parts[0]
-    proxyPort, err := strconv.Atoi(parts[1])
+    // Đọc danh sách proxies từ file
+    proxies, err := loadProxiesFromFile("list_proxy.txt")
     if err != nil {
-        panic("Invalid proxy port")
+        panic("Failed to load proxies: " + err.Error())
     }
-    
-    proxyUser := parts[2]
-    proxyPass := parts[3]
-    
-    // Tạo proxy URL với authentication
-    proxyURL := fmt.Sprintf("http://%s:%s@%s:%d", 
-        url.QueryEscape(proxyUser), 
-        url.QueryEscape(proxyPass), 
-        proxyHost, 
-        proxyPort)
     
     return &Config{
-        ServerHost: serverHost,
-        ServerPort: serverPort,
-        ProxyURL:   proxyURL,
-        ProxyHost:  proxyHost,
-        ProxyPort:  proxyPort,
-        ProxyUser:  proxyUser,
-        ProxyPass:  proxyPass,
+        Proxies: proxies,
     }
 }
 
-func getEnv(key, defaultValue string) string {
-    if value := os.Getenv(key); value != "" {
-        return value
+func loadProxiesFromFile(filename string) ([]ProxyConfig, error) {
+    file, err := os.Open(filename)
+    if err != nil {
+        return nil, err
     }
-    return defaultValue
-}
-
-func getEnvAsInt(key string, defaultValue int) int {
-    if value := os.Getenv(key); value != "" {
-        if intValue, err := strconv.Atoi(value); err == nil {
-            return intValue
+    defer file.Close()
+    
+    var proxies []ProxyConfig
+    scanner := bufio.NewScanner(file)
+    port := 3000 // Bắt đầu từ port 3000
+    
+    for scanner.Scan() {
+        line := strings.TrimSpace(scanner.Text())
+        if line == "" || strings.HasPrefix(line, "#") {
+            continue
         }
+        
+        parts := strings.Split(line, ":")
+        if len(parts) != 4 {
+            continue // Bỏ qua dòng không đúng format
+        }
+        
+        proxyHost := parts[0]
+        proxyPort, err := strconv.Atoi(parts[1])
+        if err != nil {
+            continue // Bỏ qua nếu port không hợp lệ
+        }
+        
+        proxyUser := parts[2]
+        proxyPass := parts[3]
+        
+        proxyURL := fmt.Sprintf("http://%s:%s@%s:%d", 
+            url.QueryEscape(proxyUser), 
+            url.QueryEscape(proxyPass), 
+            proxyHost, 
+            proxyPort)
+        
+        proxyConfig := ProxyConfig{
+            ServerHost: "0.0.0.0",
+            ServerPort: port,
+            ProxyURL:   proxyURL,
+            ProxyHost:  proxyHost,
+            ProxyPort:  proxyPort,
+            ProxyUser:  proxyUser,
+            ProxyPass:  proxyPass,
+        }
+
+        fmt.Println("Cau hinh ", port, proxyConfig)
+        
+        proxies = append(proxies, proxyConfig)
+        port++ // Tăng port cho proxy tiếp theo
     }
-    return defaultValue
+    
+    if err := scanner.Err(); err != nil {
+        return nil, err
+    }
+    
+    return proxies, nil
 }
 
-func (c *Config) GetServerAddress() string {
+func (c *ProxyConfig) GetServerAddress() string {
     return fmt.Sprintf("%s:%d", c.ServerHost, c.ServerPort)
 }
 
-func (c *Config) GetProxyAddress() string {
+func (c *ProxyConfig) GetProxyAddress() string {
     return fmt.Sprintf("%s:%d", c.ProxyHost, c.ProxyPort)
 }

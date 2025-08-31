@@ -1,7 +1,9 @@
 package handler
 
 import (
+    
     "crypto/tls"
+    "fmt"
     "io"
     "net"
     "net/http"
@@ -25,6 +27,7 @@ func NewProxyHandler(cfg *config.Config) *ProxyHandler {
         utils.GetLogger().Fatal("Failed to parse proxy URL", zap.Error(err))
     }
     
+    // Tạo HTTP client với proxy authentication
     transport := &http.Transport{
         Proxy: http.ProxyURL(proxyURL),
         DialContext: (&net.Dialer{
@@ -43,7 +46,14 @@ func NewProxyHandler(cfg *config.Config) *ProxyHandler {
     
     client := &http.Client{
         Transport: transport,
-        Timeout:   60 * time.Second,
+        Timeout:   120 * time.Second,
+        CheckRedirect: func(req *http.Request, via []*http.Request) error {
+            // Cho phép redirects nhưng giới hạn
+            if len(via) >= 10 {
+                return fmt.Errorf("too many redirects")
+            }
+            return nil
+        },
     }
     
     return &ProxyHandler{
@@ -52,82 +62,97 @@ func NewProxyHandler(cfg *config.Config) *ProxyHandler {
     }
 }
 
-func (h *ProxyHandler) HandleHTTP(w http.ResponseWriter, r *http.Request) {
-    logger := utils.GetLogger().With(
-        zap.String("method", r.Method),
-        zap.String("url", r.URL.String()),
-        zap.String("remote_addr", r.RemoteAddr),
-        zap.String("host", r.Host),
-    )
+func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+    // logger := utils.GetLogger().With(
+    //     zap.String("method", r.Method),
+    //     zap.String("url", r.URL.String()),
+    //     zap.String("remote_addr", r.RemoteAddr),
+    //     zap.String("host", r.Host),
+    // )
     
-    // Xử lý HTTPS CONNECT requests
     if r.Method == "CONNECT" {
-        h.HandleConnect(w, r)
+        h.handleHTTPS(w, r)
         return
     }
     
-    logger.Info("Received HTTP request")
+    h.handleHTTP(w, r)
+}
+
+func (h *ProxyHandler) handleHTTP(w http.ResponseWriter, r *http.Request) {
+    logger := utils.GetLogger().With(
+        zap.String("method", r.Method),
+        zap.String("url", r.URL.String()),
+    )
     
-    targetURL := h.constructTargetURL(r)
+    logger.Info("Processing HTTP request")
+    
+    // Xây dựng target URL
+    targetURL := h.buildTargetURL(r)
     if targetURL == "" {
         http.Error(w, "Cannot determine target URL", http.StatusBadRequest)
         return
     }
     
+    // Tạo request mới
     proxyReq, err := http.NewRequest(r.Method, targetURL, r.Body)
     if err != nil {
         logger.Error("Failed to create proxy request", zap.Error(err))
         http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
         return
     }
-    defer r.Body.Close()
     
-    h.copyHeaders(r, proxyReq)
-    h.addImportantHeaders(proxyReq)
+    // Copy headers
+    h.copyRequestHeaders(r, proxyReq)
+    
+    // Thêm headers quan trọng
+    h.addRequiredHeaders(proxyReq)
     
     start := time.Now()
     resp, err := h.client.Do(proxyReq)
     if err != nil {
-        logger.Error("Failed to send request to proxy", 
+        logger.Error("Failed to send request through proxy", 
             zap.Error(err),
-            zap.String("target_url", targetURL),
+            zap.String("target", targetURL),
         )
-        http.Error(w, "Failed to connect to proxy: "+err.Error(), http.StatusBadGateway)
+        http.Error(w, "Failed to connect through proxy: "+err.Error(), http.StatusBadGateway)
         return
     }
     defer resp.Body.Close()
     
     duration := time.Since(start)
-    logger.Info("Proxy response received", 
-        zap.Int("status_code", resp.StatusCode),
+    
+    logger.Info("Received response", 
+        zap.Int("status", resp.StatusCode),
         zap.Duration("duration", duration),
         zap.String("content_type", resp.Header.Get("Content-Type")),
     )
     
+    // Copy response headers
     h.copyResponseHeaders(w, resp)
+    
+    // Set status code
     w.WriteHeader(resp.StatusCode)
     
+    // Copy response body
     written, err := io.Copy(w, resp.Body)
     if err != nil {
         logger.Error("Failed to copy response body", zap.Error(err))
     } else {
-        logger.Info("Response sent to client", 
-            zap.Int64("bytes_written", written),
+        logger.Info("Response sent successfully", 
+            zap.Int64("bytes", written),
         )
     }
 }
 
-// Sửa lại hàm HandleConnect để xử lý đúng HTTPS
-func (h *ProxyHandler) HandleConnect(w http.ResponseWriter, r *http.Request) {
+func (h *ProxyHandler) handleHTTPS(w http.ResponseWriter, r *http.Request) {
     logger := utils.GetLogger().With(
         zap.String("method", r.Method),
         zap.String("url", r.URL.String()),
-        zap.String("remote_addr", r.RemoteAddr),
     )
     
-    logger.Info("Received HTTPS CONNECT request", zap.String("target", r.URL.Host))
+    logger.Info("Processing HTTPS CONNECT request")
     
-    // Kết nối trực tiếp đến destination thay vì qua proxy
+    // Kết nối trực tiếp đến destination
     destConn, err := net.DialTimeout("tcp", r.URL.Host, 30*time.Second)
     if err != nil {
         logger.Error("Failed to connect to destination", zap.Error(err))
@@ -136,10 +161,10 @@ func (h *ProxyHandler) HandleConnect(w http.ResponseWriter, r *http.Request) {
     }
     defer destConn.Close()
     
-    // Trả về response 200 cho client
+    // Trả về 200 OK
     w.WriteHeader(http.StatusOK)
     
-    // Hijack connection để thiết lập tunnel
+    // Hijack connection
     hijacker, ok := w.(http.Hijacker)
     if !ok {
         logger.Error("Hijacking not supported")
@@ -155,60 +180,74 @@ func (h *ProxyHandler) HandleConnect(w http.ResponseWriter, r *http.Request) {
     }
     defer clientConn.Close()
     
-    // Đã gửi response 200 ở trên, không cần gửi lại
-    logger.Info("HTTPS tunnel established", zap.String("target", r.URL.Host))
+    logger.Info("HTTPS tunnel established")
     
-    // Thiết lập tunnel giữa client và destination
-    go h.copyIO(destConn, clientConn, "client->dest")
-    h.copyIO(clientConn, destConn, "dest->client")
+    // Thiết lập tunnel
+    go h.copyData(destConn, clientConn)
+    h.copyData(clientConn, destConn)
 }
 
-func (h *ProxyHandler) copyIO(dst, src net.Conn, direction string) {
+func (h *ProxyHandler) copyData(dst, src net.Conn) {
     defer dst.Close()
     defer src.Close()
     
-    written, err := io.Copy(dst, src)
-    if err != nil {
-        utils.GetLogger().Debug("Copy IO completed", 
-            zap.String("direction", direction),
-            zap.Int64("bytes_written", written),
-            zap.Error(err),
-        )
+    io.Copy(dst, src)
+}
+
+func (h *ProxyHandler) buildTargetURL(r *http.Request) string {
+    scheme := "http"
+    if r.TLS != nil {
+        scheme = "https"
+    }
+    
+    host := r.Host
+    if host == "" {
+        host = r.URL.Host
+    }
+    if host == "" {
+        return ""
+    }
+    
+    // Xây dựng URL đầy đủ
+    if strings.Contains(r.URL.String(), "://") {
+        return r.URL.String()
+    }
+    
+    return scheme + "://" + host + r.URL.String()
+}
+
+func (h *ProxyHandler) addRequiredHeaders(req *http.Request) {
+    // Set default headers nếu chưa có
+    headers := map[string]string{
+        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection":      "keep-alive",
+    }
+    
+    for key, value := range headers {
+        if req.Header.Get(key) == "" {
+            req.Header.Set(key, value)
+        }
     }
 }
 
-func (h *ProxyHandler) addImportantHeaders(req *http.Request) {
-    if req.Header.Get("User-Agent") == "" {
-        req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-    }
-    
-    if req.Header.Get("Accept") == "" {
-        req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
-    }
-    
-    if req.Header.Get("Accept-Language") == "" {
-        req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-    }
-    
-    if req.Header.Get("Accept-Encoding") == "" {
-        req.Header.Set("Accept-Encoding", "gzip, deflate, br")
-    }
-    
-    if req.Header.Get("Connection") == "" {
-        req.Header.Set("Connection", "keep-alive")
-    }
-}
-
-func (h *ProxyHandler) copyHeaders(src *http.Request, dst *http.Request) {
+func (h *ProxyHandler) copyRequestHeaders(src, dst *http.Request) {
     for name, values := range src.Header {
-        if name == "Proxy-Connection" || name == "Connection" {
+        // Skip problematic headers
+        if strings.EqualFold(name, "Proxy-Connection") || 
+           strings.EqualFold(name, "Connection") ||
+           strings.EqualFold(name, "Keep-Alive") {
             continue
         }
+        
         for _, value := range values {
             dst.Header.Add(name, value)
         }
     }
     
+    // Set Host header
     if src.Host != "" {
         dst.Header.Set("Host", src.Host)
         dst.Host = src.Host
@@ -217,45 +256,16 @@ func (h *ProxyHandler) copyHeaders(src *http.Request, dst *http.Request) {
 
 func (h *ProxyHandler) copyResponseHeaders(w http.ResponseWriter, resp *http.Response) {
     for name, values := range resp.Header {
-        if name == "Connection" {
+        // Skip problematic headers
+        if strings.EqualFold(name, "Connection") ||
+           strings.EqualFold(name, "Keep-Alive") ||
+           strings.EqualFold(name, "Proxy-Authenticate") ||
+           strings.EqualFold(name, "Proxy-Authorization") {
             continue
-        }
-        
-        // Fix Cross-Origin issues
-        if name == "Cross-Origin-Opener-Policy" || name == "Cross-Origin-Embedder-Policy" {
-            continue // Bỏ qua các headers gây lỗi
         }
         
         for _, value := range values {
             w.Header().Add(name, value)
         }
     }
-    
-    // Thêm headers để fix mixed content
-    w.Header().Set("Access-Control-Allow-Origin", "*")
-    w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-    w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-}
-
-func (h *ProxyHandler) constructTargetURL(r *http.Request) string {
-    scheme := "http"
-    if r.TLS != nil {
-        scheme = "https"
-    }
-    
-    host := r.Host
-    if host == "" && r.URL.Host != "" {
-        host = r.URL.Host
-    }
-    
-    if host == "" {
-        return ""
-    }
-    
-    targetURL := r.URL.String()
-    if !strings.Contains(targetURL, "://") {
-        targetURL = scheme + "://" + host + targetURL
-    }
-    
-    return targetURL
 }

@@ -11,7 +11,6 @@ import (
     "syscall"
     "time"
 
-    "github.com/gorilla/mux"
     "go.uber.org/zap"
 )
 
@@ -26,20 +25,17 @@ func main() {
     cfg := config.LoadConfig()
     
     logger.Info("Starting proxy server",
-        zap.String("server", cfg.GetServerAddress()),
+        zap.String("address", cfg.GetServerAddress()),
         zap.String("proxy", cfg.GetProxyAddress()),
     )
     
+    // Tạo proxy handler
     proxyHandler := handler.NewProxyHandler(cfg)
     
-    router := mux.NewRouter()
-    
-    // Route cho tất cả các request
-    router.PathPrefix("/").HandlerFunc(proxyHandler.HandleHTTP)
-    
+    // Tạo server
     server := &http.Server{
         Addr:         cfg.GetServerAddress(),
-        Handler:      router,
+        Handler:      proxyHandler, // Sử dụng handler trực tiếp
         ReadTimeout:  30 * time.Second,
         WriteTimeout: 30 * time.Second,
         IdleTimeout:  120 * time.Second,
@@ -49,8 +45,10 @@ func main() {
     signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
     
     go func() {
+        logger.Info("Server listening", zap.String("address", server.Addr))
+        
         if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-            logger.Fatal("Failed to start server", zap.Error(err))
+            logger.Fatal("Server failed", zap.Error(err))
         }
     }()
     
@@ -61,7 +59,7 @@ func main() {
     defer cancel()
     
     if err := server.Shutdown(ctx); err != nil {
-        logger.Error("Server shutdown failed", zap.Error(err))
+        logger.Error("Shutdown failed", zap.Error(err))
     }
     
     logger.Info("Server stopped")

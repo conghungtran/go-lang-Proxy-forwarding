@@ -7,6 +7,7 @@ import (
     "net"
     "net/http"
     "net/url"
+    "proxy-server/auth"
     "proxy-server/config"
     "proxy-server/utils"
     "strings"
@@ -16,8 +17,9 @@ import (
 )
 
 type ProxyHandler struct {
-    config *config.ProxyConfig // Thay đổi từ Config sang ProxyConfig
-    client *http.Client
+    config        *config.ProxyConfig // Thay đổi từ Config sang ProxyConfig
+    client        *http.Client
+    authenticator *auth.ProxyAuthenticator
 }
 
 func NewProxyHandler(cfg *config.ProxyConfig) *ProxyHandler {
@@ -54,18 +56,18 @@ func NewProxyHandler(cfg *config.ProxyConfig) *ProxyHandler {
     }
     
     return &ProxyHandler{
-        config: cfg,
-        client: client,
+        config:        cfg,
+        client:        client,
+        authenticator: auth.NewProxyAuthenticator(cfg),
     }
 }
 
 func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-    // logger := utils.GetLogger().With(
-    //     zap.String("method", r.Method),
-    //     zap.String("url", r.URL.String()),
-    //     zap.String("remote_addr", r.RemoteAddr),
-    //     zap.String("host", r.Host),
-    // )
+    // Kiểm tra authentication trước
+    if !h.authenticator.Authenticate(r) {
+        h.authenticator.RequireAuth(w)
+        return
+    }
     
     if r.Method == "CONNECT" {
         h.handleHTTPS(w, r)

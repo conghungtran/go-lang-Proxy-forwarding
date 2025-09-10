@@ -10,13 +10,17 @@ import (
 )
 
 type ProxyConfig struct {
-    ServerHost string
-    ServerPort int
-    ProxyURL   string
-    ProxyHost  string
-    ProxyPort  int
-    ProxyUser  string
-    ProxyPass  string
+    ServerHost   string
+    ServerPort   int
+    ProxyURL     string
+    ProxyHost    string
+    ProxyPort    int
+    ProxyUser    string
+    ProxyPass    string
+    // Authentication cho client kết nối đến proxy server này
+    AuthUser     string
+    AuthPass     string
+    RequireAuth  bool
 }
 
 type Config struct {
@@ -72,17 +76,25 @@ func loadProxiesFromFile(filename string) ([]ProxyConfig, error) {
             proxyHost, 
             proxyPort)
         
+        // Tạo auth credentials cho proxy server này
+        authUser := fmt.Sprintf("user%d", port)
+        authPass := fmt.Sprintf("pass%d", port)
+        
         proxyConfig := ProxyConfig{
-            ServerHost: "0.0.0.0",
-            ServerPort: port,
-            ProxyURL:   proxyURL,
-            ProxyHost:  proxyHost,
-            ProxyPort:  proxyPort,
-            ProxyUser:  proxyUser,
-            ProxyPass:  proxyPass,
+            ServerHost:  "0.0.0.0",
+            ServerPort:  port,
+            ProxyURL:    proxyURL,
+            ProxyHost:   proxyHost,
+            ProxyPort:   proxyPort,
+            ProxyUser:   proxyUser,
+            ProxyPass:   proxyPass,
+            AuthUser:    authUser,
+            AuthPass:    authPass,
+            RequireAuth: true,
         }
 
-        fmt.Println("Cau hinh ", port, proxyConfig)
+        fmt.Printf("Cau hinh Port %d: ProxyTo=%s:%d, Auth=%s:%s\n", 
+            port, proxyHost, proxyPort, authUser, authPass)
         
         proxies = append(proxies, proxyConfig)
         port++ // Tăng port cho proxy tiếp theo
